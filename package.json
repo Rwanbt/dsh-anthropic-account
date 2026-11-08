@@ -1,0 +1,53 @@
+{
+  "name": "dsh-anthropic-account",
+  "version": "1.0.0",
+  "private": false,
+  "type": "module",
+  "description": "DeepSeek Harness plugin: adds an \"Anthropic-account\" model provider powered by a Claude Pro/Max subscription, and repairs the Codex OAuth connection from the local CLI credentials.",
+  "license": "MIT",
+  "author": "Rwanbt",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "anthropic",
+    "claude",
+    "claude-code",
+    "oauth",
+    "openai-codex"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Rwanbt/dsh-anthropic-account.git"
+  },
+  "homepage": "https://github.com/Rwanbt/dsh-anthropic-account#readme",
+  "bugs": {
+    "url": "https://github.com/Rwanbt/dsh-anthropic-account/issues"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "exports": {
+    ".": "./index.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "logic.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "assets/*.png",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --check index.js && node --check logic.js && node --test test/"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

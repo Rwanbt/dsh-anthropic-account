@@ -1,0 +1,19 @@
+# Bundle patch for dsh-anthropic-account.
+#
+# One Host row does all the work: it provisions the `anthropic-account` route in
+# the `llm-pi-ai` settings section, keeps the route's model list equal to what
+# the subscription currently serves (latest generation of each family), keeps
+# the OAuth access token of the Claude subscription fresh in the
+# `ANTHROPIC_ACCOUNT_OAUTH` credential reference, and restores the Codex OAuth
+# grant from the local Codex CLI credentials.
+- insert:
+    - id: anthropic-account
+      name: dsh-anthropic-account
+      config:
+        providerId: anthropic-account
+        credentialRef: ANTHROPIC_ACCOUNT_OAUTH
+        provisionProvider: true
+        repairCodex: true
+        syncModels: true
+        modelSyncHours: 6
+        modelsPerFamily: 1
