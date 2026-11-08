@@ -35,12 +35,14 @@
   "files": [
     "index.js",
     "logic.js",
+    "lib/*.mjs",
     "cordis.patch.yml",
     "locale/*.json",
     "icon.svg",
     "assets/*.png",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "SECURITY.md"
   ],
   "scripts": {
     "test": "node --check index.js && node --check logic.js && node --test"

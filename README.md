@@ -137,11 +137,25 @@ binary to build.
 ## Development
 
 ```bash
-npm test        # syntax checks + unit tests (model selection rules)
+npm test        # syntax checks + 55 unit and policy tests
 ```
 
-The model-selection rules are pure functions, so they run without a Harness, a network or any
-credential.
+The model-selection, credential-parsing, status-redaction and packaging rules are pure functions,
+so they run without a Harness, a network or any credential. The suite also asserts safety
+properties over the shipped sources — see [Security](#security).
+
+## Security
+
+- **Network destinations are allowlisted** (`api.anthropic.com`, `claude.ai`,
+  `platform.claude.com`) and asserted by a test; there is no telemetry or update check.
+- **No shell**: process spawning goes through `execFile` only, never `exec`/`spawn`/`shell: true`.
+- **No literal credential in the repository**: every tracked file is scanned for token shapes;
+  fixtures are assembled at runtime.
+- **Status is redacted** before it is written; **credential files are written `0600` and
+  atomically**; **secrets only ever reach the credential plane, never configuration**.
+- **No third-party runtime dependency** and no install script.
+
+Full threat model and reporting process: [SECURITY.md](SECURITY.md).
 
 ## License
 

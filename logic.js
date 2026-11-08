@@ -16,31 +16,41 @@
  *    currently use. `GET /v1/models` with the grant returns each model's id,
  *    display name, context window, output cap and image capability, so the
  *    route follows the account instead of a list frozen at build time. The
- *    sync runs at start and then periodically, and only writes when the list
- *    actually changed.
+ *    catalog rules themselves live in `./lib/model-catalog.mjs`.
  *
  * 3. Keep the token fresh and repair the Codex OAuth grant:
- *    - `~/.claude/.credentials.json` is the canonical Claude Code store. We
- *      mirror its access token into the `ANTHROPIC_ACCOUNT_OAUTH` credential
- *      reference and refresh it in place (writing the rotated refresh token
- *      back) shortly before it expires.
- *    - `~/.codex/auth.json` holds the ChatGPT subscription tokens. We turn it
- *      into the `llm-pi-ai/openai-codex` credential record the shipped
- *      `openai-codex` provider already reads, so its OAuth connection works
- *      again without a browser round trip.
+ *    - the Claude Code credential store (macOS Keychain, or
+ *      `<configDir>/.credentials.json` everywhere else) holds the grant; the
+ *      access token is mirrored into the `ANTHROPIC_ACCOUNT_OAUTH` credential
+ *      reference and refreshed in place shortly before it expires;
+ *    - `~/.codex/auth.json` holds the ChatGPT subscription tokens, which become
+ *      the `llm-pi-ai/openai-codex` credential record the shipped
+ *      `openai-codex` provider already reads.
  *
  * Nothing here reimplements a provider protocol, and no secret is written to
  * configuration: tokens live in the credential plane, exactly as the Models
- * page expects. A small status document next to the profile records what the
- * last run did, so a surface (or the user) can see it without a log file.
+ * page expects. Credential parsing and naming rules live in
+ * `./lib/credentials.mjs`; the status document is redacted through
+ * `./lib/status.mjs` before it is written.
  */
 
 import { execFile } from 'node:child_process'
-import { createHash } from 'node:crypto'
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, join } from 'node:path'
 import { promisify } from 'node:util'
+import {
+  buildCodexGrant,
+  claudeConfigDirs,
+  grantFromTokenResponse,
+  isHealthyCodexGrant,
+  isSubscriptionToken,
+  keychainServiceNames,
+  needsRefresh,
+  parseClaudeDocument,
+} from './lib/credentials.mjs'
+import { perFamilyCount, profileModelsFromListing, sameModels } from './lib/model-catalog.mjs'
+import { redactCredentialMaterial } from './lib/status.mjs'
 
 const execFileAsync = promisify(execFile)
 
@@ -56,8 +66,6 @@ const CLAUDE_MODELS_URL = `${CLAUDE_API_BASE}/v1/models`
 const ANTHROPIC_VERSION = '2023-06-01'
 const CLAUDE_CLI_USER_AGENT = 'claude-cli/2.1.280 (external, sdk-cli)'
 const CLAUDE_BETAS = 'claude-code-20250219,oauth-2025-04-20'
-/** Refresh this long before the access token expires. */
-const REFRESH_MARGIN_MS = 10 * 60 * 1000
 /** How often the token mirror re-checks the canonical store. */
 const TICK_MS = 60 * 1000
 /** How often the model list is re-read from the endpoint. */
@@ -69,7 +77,6 @@ const PROVISION_ATTEMPTS = 8
 const PROVISION_RETRY_MS = 2500
 const MODEL_PAGE_LIMIT = 1000
 const MODEL_MAX_PAGES = 5
-const MODEL_MAX_ENTRIES = 60
 
 /**
  * Models used only until the first successful discovery, so a brand-new install
@@ -102,7 +109,7 @@ export function apply(ctx, config = {}) {
       version: 1,
       checkedAt: undefined,
       provider: { id: providerId, ref: refName, provisioned: false, error: undefined },
-      claude: { ok: false, source: undefined, expiresAt: undefined, refreshed: false, error: undefined },
+      claude: { ok: false, store: undefined, source: undefined, expiresAt: undefined, refreshed: false, error: undefined },
       codex: { ok: false, imported: false, error: undefined },
       models: { ok: false, count: 0, ids: [], syncedAt: undefined, changed: false, error: undefined },
     }
@@ -132,6 +139,7 @@ export function apply(ctx, config = {}) {
         })
         status.claude = {
           ok: result.ok === true,
+          store: result.store,
           source: result.source,
           expiresAt: result.expiresAt,
           refreshed: result.refreshed === true,
@@ -190,7 +198,7 @@ export function apply(ctx, config = {}) {
         try {
           const repaired = await repairCodexGrant(host)
           status.codex = { ok: repaired.ok === true, imported: repaired.imported === true, error: repaired.reason }
-          if (repaired.imported === true) log('info', 'Codex OAuth grant restored from ~/.codex/auth.json')
+          if (repaired.imported === true) log('info', 'Codex OAuth grant restored from the Codex CLI store')
           else if (repaired.ok !== true) log('warn', `Codex grant not repaired: ${repaired.reason}`)
         } catch (error) {
           status.codex = { ok: false, imported: false, error: messageOf(error) }
@@ -251,11 +259,18 @@ function statusPath() {
   return join(home, 'anthropic-account-status.json')
 }
 
+/**
+ * Publish the last run's observations, with credential-shaped text redacted as a
+ * second line of defence: the status document records no token by construction,
+ * and this guarantees that a future field cannot start leaking one.
+ * @param {object} status observations.
+ */
 async function writeStatus(status) {
   const path = statusPath()
+  const safe = redactCredentialMaterial({ ...status, checkedAt: new Date().toISOString() })
   await mkdir(dirname(path), { recursive: true })
   const temporary = `${path}.tmp`
-  await writeFile(temporary, `${JSON.stringify(status, null, 2)}\n`, 'utf8')
+  await writeFile(temporary, `${JSON.stringify(safe, null, 2)}\n`, 'utf8')
   await rename(temporary, path)
 }
 
@@ -264,14 +279,6 @@ async function writeStatus(status) {
 /**
  * Read the models the subscription can use, keeping only the latest generation
  * of each family.
- *
- * The grant's `GET /v1/models` answers with id, display name, `line`,
- * `created_at`, `max_input_tokens`, `max_tokens`, image capability and
- * lifecycle, which is everything a pi-ai model profile needs — so the route's
- * catalog follows the account instead of a list frozen at build time. Keeping
- * one generation per family (`opus`, `sonnet`, `haiku`, `fable`, …) leaves a
- * short picker of current models instead of every historical snapshot the
- * account still accepts.
  * @param {object} ctx injected Host context.
  * @param {{perFamily: number}} options how many generations to keep per family; 0 keeps all.
  * @returns {Promise<Array<object>>} model profiles in endpoint order.
@@ -306,126 +313,21 @@ async function discoverModels(ctx, options = {}) {
     after = body.last_id
   }
 
-  const models = profileModelsFromListing(rows, perFamilyOf(options))
+  const models = profileModelsFromListing(rows, options?.perFamily ?? 1)
   if (models.length === 0) throw new Error('the endpoint returned no usable model')
-  return models.slice(0, MODEL_MAX_ENTRIES)
-}
-
-function perFamilyOf(options) {
-  const value = Number(options?.perFamily)
-  return Number.isInteger(value) && value >= 0 ? value : 1
-}
-
-/**
- * Map endpoint model objects to pi-ai model profiles.
- *
- * Deprecated and retired models are dropped, then the listing is reduced to the
- * newest `perFamily` generations of each `line`: the endpoint orders families
- * by numbering and also reports `created_at`, and a model offered under both an
- * undated alias and a dated snapshot is represented once, by the alias.
- * @param {Array<object>} rows endpoint model objects.
- * @param {number} perFamily generations kept per family; 0 keeps every usable model.
- * @returns {Array<object>} clean model profiles.
- */
-export function profileModelsFromListing(rows, perFamily) {
-  const entries = []
-  const seen = new Set()
-  for (const row of rows) {
-    if (row === null || typeof row !== 'object') continue
-    const id = typeof row.id === 'string' ? row.id : undefined
-    if (id === undefined || id.length === 0 || seen.has(id)) continue
-    if (row.lifecycle === 'deprecated' || row.lifecycle === 'retired') continue
-    seen.add(id)
-
-    const parsed = parseModelId(id)
-    const input = ['text']
-    if (row.capabilities?.image_input?.supported === true) input.push('image')
-    entries.push({
-      id,
-      name: typeof row.display_name === 'string' && row.display_name.length > 0 ? row.display_name : id,
-      ...capacity('contextWindow', row.max_input_tokens),
-      ...capacity('maxTokens', row.max_tokens),
-      input,
-      family: typeof row.line === 'string' && row.line.length > 0 ? row.line : parsed.family,
-      version: parsed.version,
-      dated: parsed.dated,
-      createdAt: Date.parse(String(row.created_at ?? '')) || 0,
-    })
-  }
-
-  const survivors = perFamily > 0 ? newestPerFamily(entries, perFamily) : entries
-  return survivors.map((entry) => ({
-    id: entry.id,
-    name: entry.name,
-    ...(entry.contextWindow === undefined ? {} : { contextWindow: entry.contextWindow }),
-    ...(entry.maxTokens === undefined ? {} : { maxTokens: entry.maxTokens }),
-    input: entry.input,
-  }))
-}
-
-/** Keep the newest `perFamily` generations of every model family, in endpoint order. */
-function newestPerFamily(entries, perFamily) {
-  const groups = new Map()
-  for (const entry of entries) {
-    const group = groups.get(entry.family)
-    if (group === undefined) groups.set(entry.family, [entry])
-    else group.push(entry)
-  }
-  const kept = new Set()
-  for (const group of groups.values()) {
-    group.sort(compareGenerations)
-    for (const entry of group.slice(0, perFamily)) kept.add(entry.id)
-  }
-  return entries.filter((entry) => kept.has(entry.id))
-}
-
-/**
- * Order two models of the same family, newest first: higher generation number
- * wins, then the undated alias beats a pinned snapshot of that generation, then
- * the later `created_at` wins.
- */
-function compareGenerations(left, right) {
-  const length = Math.max(left.version.length, right.version.length)
-  for (let index = 0; index < length; index++) {
-    const a = left.version[index] ?? 0
-    const b = right.version[index] ?? 0
-    if (a !== b) return b - a
-  }
-  if (left.dated !== right.dated) return left.dated ? 1 : -1
-  return right.createdAt - left.createdAt
-}
-
-/** Split a model id into its family, its generation numbers, and a dated-snapshot flag. */
-function parseModelId(id) {
-  const dated = /-\d{8}$/u.test(id)
-  const tokens = id.replace(/-\d{8}$/u, '').split('-')
-  if (tokens[0] === 'claude') tokens.shift()
-  let index = 0
-  while (index < tokens.length && !/^\d+$/u.test(tokens[index])) index++
-  const family = tokens.slice(0, index).join('-') || 'claude'
-  const version = []
-  for (const token of tokens.slice(index)) {
-    if (!/^\d+$/u.test(token)) break
-    version.push(Number(token))
-  }
-  return { family, version, dated }
-}
-
-function capacity(field, value) {
-  return Number.isInteger(value) && value > 0 ? { [field]: value } : {}
+  return models
 }
 
 /** The stored subscription access token, or undefined when nothing usable exists. */
 async function readAccessToken(ctx) {
   try {
     const resolved = await ctx.get('credentials')?.resolve('ANTHROPIC_ACCOUNT_OAUTH')
-    if (typeof resolved?.value === 'string' && resolved.value.includes('sk-ant-oat')) return resolved.value
+    if (isSubscriptionToken(resolved?.value)) return resolved.value
   } catch {
     // fall through to the canonical store
   }
   const store = await readClaudeStore()
-  const token = store?.oauth?.accessToken
-  return typeof token === 'string' && token.includes('sk-ant-oat') ? token : undefined
+  return isSubscriptionToken(store?.oauth?.accessToken) ? store.oauth.accessToken : undefined
 }
 
 /* ── provider profile ─────────────────────────────────────────────────────── */
@@ -472,21 +374,6 @@ async function provisionProvider(ctx, names, models) {
   }
   const error = await writeProfile(ctx, [{ op: 'set', path: ['providers', names.providerId], value: profile }], names.providerId, profile)
   return error === undefined ? { provisioned: true, modelsChanged: true } : { provisioned: false, modelsChanged: false, error }
-}
-
-/** Whether two model lists describe the same route catalog. */
-function sameModels(current, wanted) {
-  if (current.length !== wanted.length) return false
-  for (let index = 0; index < wanted.length; index++) {
-    const left = current[index] ?? {}
-    const right = wanted[index]
-    if (left.id !== right.id) return false
-    if (left.name !== right.name) return false
-    if (Number(left.contextWindow) !== Number(right.contextWindow)) return false
-    if (Number(left.maxTokens) !== Number(right.maxTokens)) return false
-    if (JSON.stringify(left.input ?? []) !== JSON.stringify(right.input ?? [])) return false
-  }
-  return true
 }
 
 /** Read one provider profile out of the live settings form, or undefined. */
@@ -573,56 +460,50 @@ async function editEntryConfig(editor, providerId, profile) {
  * token is about to expire.
  * @param {object} ctx injected Host context carrying `credentials`.
  * @param {{refName: string, force: boolean, refreshClaudeCode: boolean, remember: Function, lastMirrored: Function}} options flow switches.
- * @returns {Promise<{ok: boolean, mirrored?: boolean, refreshed?: boolean, source?: string, expiresAt?: number, reason?: string}>}
+ * @returns {Promise<{ok: boolean, mirrored?: boolean, refreshed?: boolean, store?: string, source?: string, expiresAt?: number, reason?: string}>}
  */
 async function mirrorClaudeToken(ctx, options) {
   const credentials = ctx.get('credentials')
   if (credentials === undefined) return { ok: false, reason: 'no credentials service' }
 
   const store = await readClaudeStore()
-  if (store === undefined) return { ok: false, reason: 'no ~/.claude/.credentials.json' }
+  if (store === undefined) return { ok: false, reason: 'no Claude Code credential store found' }
 
   let oauth = store.oauth
-  let source = 'claude-code'
+  let source = store.describe
   let refreshed = false
-  const expiresAt = Number(oauth.expiresAt) || 0
-  const expiring = expiresAt - Date.now() < REFRESH_MARGIN_MS
 
-  if ((expiring || options.force) && options.refreshClaudeCode && typeof oauth.refreshToken === 'string') {
+  if ((needsRefresh(oauth, Date.now()) || options.force) && options.refreshClaudeCode && typeof oauth.refreshToken === 'string') {
     try {
       const next = await refreshClaudeToken(oauth.refreshToken)
       oauth = { ...oauth, ...next }
       await writeClaudeStore(store, oauth)
-      source = 'refreshed'
+      source = `${store.describe} (refreshed)`
       refreshed = true
     } catch (error) {
       // A refresh failure is not fatal while the access token is still valid.
-      if (expiring) return { ok: false, reason: `refresh failed: ${messageOf(error)}` }
+      if (needsRefresh(oauth, Date.now())) return { ok: false, reason: `refresh failed: ${messageOf(error)}` }
     }
   }
 
-  const accessToken = oauth.accessToken
-  if (typeof accessToken !== 'string' || accessToken.length === 0) return { ok: false, reason: 'no access token' }
-  if (!accessToken.includes('sk-ant-oat')) {
+  if (!isSubscriptionToken(oauth.accessToken)) {
     return { ok: false, reason: 'the stored Claude token is not a subscription (sk-ant-oat) token' }
   }
 
-  const alreadyMirrored = options.lastMirrored() === accessToken
+  const alreadyMirrored = options.lastMirrored() === oauth.accessToken
   if (!alreadyMirrored) {
-    await credentials.set(options.refName, accessToken)
-    options.remember(accessToken)
+    await credentials.set(options.refName, oauth.accessToken)
+    options.remember(oauth.accessToken)
   }
   return {
     ok: true,
     mirrored: !alreadyMirrored,
     refreshed,
+    store: store.kind,
     source,
     expiresAt: Number(oauth.expiresAt) || undefined,
   }
 }
-
-/** The Keychain service the Claude Code CLI writes on macOS. */
-const CLAUDE_KEYCHAIN_SERVICE = 'Claude Code-credentials'
 
 /**
  * Locate and parse the canonical Claude Code credential store.
@@ -632,82 +513,38 @@ const CLAUDE_KEYCHAIN_SERVICE = 'Claude Code-credentials'
  * `<configDir>/.credentials.json`, where `configDir` is `$CLAUDE_CONFIG_DIR` or
  * `~/.claude`. Both shapes are the same JSON document, so the readers differ
  * only in how the bytes are obtained.
- * @returns {Promise<{kind: 'file'|'keychain', path?: string, service?: string, account?: string, document: object, oauth: object} | undefined>}
+ * @returns {Promise<{kind: 'file'|'keychain', describe: string, path?: string, service?: string, account?: string, document: object, oauth: object} | undefined>}
  */
 async function readClaudeStore() {
-  for (const candidate of darwinKeychainCandidates()) {
-    const blob = await readKeychainSecret(candidate.service)
-    if (blob === undefined) continue
-    const parsed = parseClaudeDocument(blob)
-    if (parsed === undefined) continue
-    return { kind: 'keychain', service: candidate.service, account: await keychainAccountName(candidate.service), document: parsed.document, oauth: parsed.oauth }
+  const configDirs = claudeConfigDirs({ env: process.env, home: homedir() })
+  if (process.platform === 'darwin') {
+    for (const service of keychainServiceNames(configDirs)) {
+      const blob = await readKeychainSecret(service)
+      if (blob === undefined) continue
+      const parsed = parseClaudeDocument(blob)
+      if (parsed === undefined) continue
+      return {
+        kind: 'keychain',
+        describe: `keychain:${service.replace('Claude Code-credentials', 'claude-code')}`,
+        service,
+        account: await keychainAccountName(service),
+        document: parsed.document,
+        oauth: parsed.oauth,
+      }
+    }
   }
-  for (const path of claudeStorePaths()) {
+  for (const directory of configDirs) {
+    const path = join(directory, '.credentials.json')
     try {
       const parsed = parseClaudeDocument(await readFile(path, 'utf8'))
-      if (parsed !== undefined) return { kind: 'file', path, document: parsed.document, oauth: parsed.oauth }
+      if (parsed !== undefined) {
+        return { kind: 'file', describe: 'claude-code', path, document: parsed.document, oauth: parsed.oauth }
+      }
     } catch {
       // try the next candidate
     }
   }
   return undefined
-}
-
-/**
- * Parse one stored credential document, accepting both the Claude Code wrapper
- * (`{ claudeAiOauth: { accessToken, refreshToken, expiresAt } }`) and the flat
- * legacy shape some installations carry.
- * @param {string} text raw stored bytes.
- * @returns {{document: object, oauth: object} | undefined} undefined when the blob is not a grant.
- */
-function parseClaudeDocument(text) {
-  let document
-  try {
-    document = JSON.parse(text)
-  } catch {
-    return undefined
-  }
-  if (document === null || typeof document !== 'object') return undefined
-  const wrapped = document.claudeAiOauth
-  const oauth = wrapped !== null && typeof wrapped === 'object' ? wrapped : document
-  if (typeof oauth.accessToken !== 'string' || oauth.accessToken.length === 0) {
-    // An `mcpOAuth`-only blob is an MCP grant, not a Claude account.
-    return undefined
-  }
-  return { document, oauth }
-}
-
-/** Candidate Claude Code credential paths, honouring `CLAUDE_CONFIG_DIR`. */
-function claudeStorePaths() {
-  const paths = []
-  for (const directory of claudeConfigDirs()) paths.push(join(directory, '.credentials.json'))
-  return paths
-}
-
-/** Config directories Claude Code may use, most specific first. */
-function claudeConfigDirs() {
-  const dirs = []
-  const configured = process.env.CLAUDE_CONFIG_DIR
-  if (typeof configured === 'string' && configured.length > 0) dirs.push(configured)
-  const fallback = join(homedir(), '.claude')
-  if (!dirs.includes(fallback)) dirs.push(fallback)
-  return dirs
-}
-
-/**
- * Keychain services Claude Code may have written: the primary one, then the
- * per-config-directory ones, whose suffix is `sha256(configDir)` truncated to
- * eight hex characters — the CLI's own naming scheme.
- * @returns {Array<{service: string}>} candidates in preference order.
- */
-function darwinKeychainCandidates() {
-  if (process.platform !== 'darwin') return []
-  const services = [{ service: CLAUDE_KEYCHAIN_SERVICE }]
-  for (const directory of claudeConfigDirs()) {
-    const suffix = createHash('sha256').update(resolve(directory)).digest('hex').slice(0, 8)
-    services.push({ service: `${CLAUDE_KEYCHAIN_SERVICE}-${suffix}` })
-  }
-  return services
 }
 
 /**
@@ -717,6 +554,7 @@ function darwinKeychainCandidates() {
  */
 async function readKeychainSecret(service) {
   try {
+    // `execFile` (never a shell) keeps the service name an argument, not code.
     const { stdout } = await execFileAsync('security', ['find-generic-password', '-s', service, '-w'], {
       timeout: 4_000,
       maxBuffer: 1024 * 1024,
@@ -844,31 +682,9 @@ async function refreshClaudeToken(refreshToken) {
       lastFailure = `${attempt.url}: invalid JSON (${messageOf(error)})`
       continue
     }
-    return grantFromTokenResponse(data, refreshToken)
+    return grantFromTokenResponse(data, refreshToken, Date.now())
   }
   throw new Error(lastFailure ?? 'no token endpoint answered')
-}
-
-/** Normalize either token-endpoint response shape into the stored grant fields. */
-function grantFromTokenResponse(data, previousRefreshToken) {
-  const now = Date.now()
-  const expiresIn = Number(data.expires_in) > 0 ? Number(data.expires_in) : undefined
-  const absolute = Number(data.expires_at) > 0 ? Number(data.expires_at) : undefined
-  const expiresAt = absolute !== undefined
-    ? absolute > 1e12 ? absolute : absolute * 1000
-    : now + (expiresIn ?? 10 * 3600) * 1000 - 60_000
-  return {
-    accessToken: data.access_token,
-    ...(typeof data.refresh_token === 'string' ? { refreshToken: data.refresh_token } : { refreshToken: previousRefreshToken }),
-    expiresAt,
-    ...(Number(data.refresh_token_expires_in) > 0
-      ? { refreshTokenExpiresAt: now + Number(data.refresh_token_expires_in) * 1000 }
-      : {}),
-    ...(typeof data.scope === 'string' && data.scope.length > 0 ? { scopes: data.scope.split(' ') } : {}),
-    ...(typeof data.account?.subscription_type === 'string'
-      ? { subscriptionType: data.account.subscription_type }
-      : {}),
-  }
 }
 
 /* ── Codex grant repair ───────────────────────────────────────────────────── */
@@ -885,33 +701,24 @@ async function repairCodexGrant(ctx) {
   const credentials = ctx.get('credentials')
   if (credentials === undefined) return { ok: false, reason: 'no credentials service' }
 
-  const path = join(homedir(), '.codex', 'auth.json')
   let document
   try {
-    document = JSON.parse(await readFile(path, 'utf8'))
+    document = JSON.parse(await readFile(join(homedir(), '.codex', 'auth.json'), 'utf8'))
   } catch {
     return { ok: false, reason: 'no ~/.codex/auth.json' }
   }
-  const tokens = document?.tokens
-  const access = typeof tokens?.access_token === 'string' ? tokens.access_token : undefined
-  if (access === undefined) return { ok: false, reason: 'no access token in ~/.codex/auth.json' }
+  const built = buildCodexGrant(document, Date.now())
+  if (built === undefined) return { ok: false, reason: 'no access token in ~/.codex/auth.json' }
 
   const key = 'llm-pi-ai/openai-codex'
   const current = await readRecord(credentials, key)
   const payload = current?.kind === 'grant' ? current.payload : undefined
-  if (payload?.access === access) return { ok: true, imported: false }
-  if (Number(payload?.expires) > Date.now() + 5 * 60 * 1000) {
+  if (payload?.access === built.payload.access) return { ok: true, imported: false }
+  if (isHealthyCodexGrant(payload, Date.now())) {
     return { ok: true, imported: false, reason: 'a newer stored Codex grant is already valid' }
   }
 
-  const grant = {
-    type: 'oauth',
-    access,
-    ...(typeof tokens?.refresh_token === 'string' ? { refresh: tokens.refresh_token } : {}),
-    expires: jwtExpiry(access) ?? Date.now() + 60 * 60 * 1000,
-    ...(typeof tokens?.account_id === 'string' ? { accountId: tokens.account_id } : {}),
-  }
-  await credentials.modifyRecord(key, async () => ({ kind: 'grant', payload: grant }))
+  await credentials.modifyRecord(key, async () => ({ kind: 'grant', payload: built.payload }))
   return { ok: true, imported: true }
 }
 
@@ -919,18 +726,6 @@ async function repairCodexGrant(ctx) {
 async function readRecord(credentials, key) {
   try {
     return await credentials.readRecord(key)
-  } catch {
-    return undefined
-  }
-}
-
-/** Absolute expiry of a JWT access token, in milliseconds. */
-function jwtExpiry(token) {
-  try {
-    const payload = token.split('.')[1]
-    if (payload === undefined) return undefined
-    const json = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'))
-    return Number(json.exp) > 0 ? Number(json.exp) * 1000 : undefined
   } catch {
     return undefined
   }
@@ -955,13 +750,6 @@ function hoursToMs(hours, fallbackHours) {
   const value = Number(hours)
   const effective = Number.isFinite(value) && value > 0 ? value : fallbackHours
   return Math.min(Math.max(effective * 3_600_000, 60_000), 7 * 24 * 3_600_000)
-}
-
-/** How many generations of each model family the route keeps; 0 keeps every model. */
-function perFamilyCount(value) {
-  const number = Number(value)
-  if (!Number.isInteger(number) || number < 0) return 1
-  return Math.min(number, 20)
 }
 
 function messageOf(error) {
