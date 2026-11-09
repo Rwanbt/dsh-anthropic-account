@@ -82,12 +82,21 @@ const MODEL_MAX_PAGES = 5
  * Models used only until the first successful discovery, so a brand-new install
  * still shows a usable route if the endpoint cannot be reached yet. The next
  * sync replaces them with the account's real list.
+ *
+ * The reasoning fields mirror what the endpoint reports for the current Claude
+ * generation: adaptive thinking with effort levels. Without them DSH
+ * materializes the model as non-reasoning and the composer offers no effort
+ * setting.
  */
+const FALLBACK_REASONING = {
+  reasoningEfforts: { off: null, low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max' },
+  compat: { forceAdaptiveThinking: true, supportsTemperature: false },
+}
 const FALLBACK_MODELS = [
-  { id: 'claude-opus-5-5', name: 'Claude Opus 5.5', contextWindow: 1_000_000, maxTokens: 128_000, input: ['text', 'image'] },
-  { id: 'claude-sonnet-5-5', name: 'Claude Sonnet 5.5', contextWindow: 1_000_000, maxTokens: 128_000, input: ['text', 'image'] },
-  { id: 'claude-haiku-5-5', name: 'Claude Haiku 5.5', contextWindow: 1_000_000, maxTokens: 128_000, input: ['text', 'image'] },
-  { id: 'claude-fable-5-1', name: 'Claude Fable 5.1', contextWindow: 1_000_000, maxTokens: 128_000, input: ['text', 'image'] },
+  { id: 'claude-opus-5-5', name: 'Claude Opus 5.5', contextWindow: 1_000_000, maxTokens: 128_000, input: ['text', 'image'], ...FALLBACK_REASONING },
+  { id: 'claude-sonnet-5-5', name: 'Claude Sonnet 5.5', contextWindow: 1_000_000, maxTokens: 128_000, input: ['text', 'image'], ...FALLBACK_REASONING },
+  { id: 'claude-haiku-5-5', name: 'Claude Haiku 5.5', contextWindow: 1_000_000, maxTokens: 128_000, input: ['text', 'image'], ...FALLBACK_REASONING },
+  { id: 'claude-fable-5-1', name: 'Claude Fable 5.1', contextWindow: 1_000_000, maxTokens: 128_000, input: ['text', 'image'], ...FALLBACK_REASONING },
 ]
 
 export function apply(ctx, config = {}) {

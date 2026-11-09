@@ -6,11 +6,18 @@ import {
   parseModelId,
   perFamilyCount,
   profileModelsFromListing,
+  reasoningFieldsFromCapabilities,
   sameModels,
 } from '../lib/model-catalog.mjs'
 
 /** One `/v1/models` row, with the defaults a current Claude model carries. */
-function row(id, { line = 'opus', created = '2026-01-01T00:00:00Z', lifecycle = 'active', context = 1_000_000, max = 128_000, image = true } = {}) {
+function row(id, { line = 'opus', created = '2026-01-01T00:00:00Z', lifecycle = 'active', context = 1_000_000, max = 128_000, image = true, effort, adaptive = false, budget = false } = {}) {
+  const effortCapability = effort === undefined
+    ? undefined
+    : {
+        supported: true,
+        ...Object.fromEntries(effort.map((level) => [level, { supported: true }])),
+      }
   return {
     type: 'model',
     id,
@@ -20,7 +27,18 @@ function row(id, { line = 'opus', created = '2026-01-01T00:00:00Z', lifecycle = 
     lifecycle,
     max_input_tokens: context,
     max_tokens: max,
-    capabilities: { image_input: { supported: image } },
+    capabilities: {
+      image_input: { supported: image },
+      ...(effortCapability === undefined ? {} : { effort: effortCapability }),
+      thinking: {
+        supported: adaptive || budget,
+        types: {
+          adaptive: { supported: adaptive },
+          enabled: { supported: budget },
+          disabled: { supported: true },
+        },
+      },
+    },
   }
 }
 
@@ -173,4 +191,51 @@ test('sameModels detects any catalog change', () => {
   assert.equal(sameModels([], []), true)
   // Order is part of the catalog: a reorder is a change to write.
   assert.equal(sameModels([...base, { ...base[0], id: 'b' }], [{ ...base[0], id: 'b' }, ...base]), false)
+})
+
+/* ── reasoning / effort mapping ─────────────────────────────────────────── */
+
+test('adaptive models get effort levels and the adaptive compat gate', () => {
+  const fields = reasoningFieldsFromCapabilities(row('claude-opus-5-5', { effort: ['low', 'medium', 'high', 'xhigh', 'max'], adaptive: true }))
+  assert.deepEqual(fields.reasoningEfforts, { off: null, low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max' })
+  assert.deepEqual(fields.compat, { forceAdaptiveThinking: true, supportsTemperature: false })
+})
+
+test('effort without adaptive thinking stays on the budget path (no compat)', () => {
+  const fields = reasoningFieldsFromCapabilities(row('claude-opus-4-5-20251101', { effort: ['low', 'medium', 'high'], budget: true }))
+  assert.deepEqual(fields.reasoningEfforts, { off: null, low: 'low', medium: 'medium', high: 'high' })
+  assert.equal(fields.compat, undefined)
+})
+
+test('thinking without effort levels offers the conventional three', () => {
+  const fields = reasoningFieldsFromCapabilities(row('legacy-model', { budget: true }))
+  assert.deepEqual(fields.reasoningEfforts, { off: null, low: 'low', medium: 'medium', high: 'high' })
+  assert.equal(fields.compat, undefined)
+})
+
+test('a model without thinking capabilities declares no reasoning', () => {
+  assert.deepEqual(reasoningFieldsFromCapabilities(row('plain-model')), {})
+  assert.deepEqual(reasoningFieldsFromCapabilities(null), {})
+})
+
+test('only the effort levels the endpoint reports are declared', () => {
+  const fields = reasoningFieldsFromCapabilities(row('subset', { effort: ['low', 'high'], adaptive: true }))
+  assert.deepEqual(Object.keys(fields.reasoningEfforts), ['off', 'low', 'high'])
+})
+
+test('the profile carries reasoning fields through the reduction', () => {
+  const [model] = profileModelsFromListing(
+    [row('claude-opus-5-5', { effort: ['low', 'medium', 'high', 'xhigh', 'max'], adaptive: true })],
+    1,
+  )
+  assert.equal(model.reasoningEfforts.max, 'max')
+  assert.equal(model.reasoningEfforts.off, null)
+  assert.equal(model.compat.forceAdaptiveThinking, true)
+})
+
+test('sameModels detects a reasoning-capability change', () => {
+  const adaptive = profileModelsFromListing([row('claude-opus-5-5', { effort: ['low', 'high'], adaptive: true })], 1)
+  const budget = profileModelsFromListing([row('claude-opus-5-5', { effort: ['low', 'high'], budget: true })], 1)
+  assert.equal(sameModels(adaptive, adaptive), true)
+  assert.equal(sameModels(adaptive, budget), false)
 })

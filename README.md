@@ -19,9 +19,14 @@ token through its credential plane, and the bundled pi-ai adapter does the rest.
 - **A model list that follows your account**: read from `GET /v1/models` at start and every
   6 hours, reduced to the **latest generation of each family** (Opus, Sonnet, Haiku, Fable), with
   the real context window, output cap and image support reported by the endpoint.
+- **A working Effort setting** on every model: the endpoint's advertised reasoning levels become
+  the model's `reasoningEfforts`, so the composer offers Off / Low / Medium / High / Xhigh / Max
+  instead of hiding the control.
 - **A repaired Codex connection**: `~/.codex/auth.json` is converted into the
   `llm-pi-ai/openai-codex` credential record the shipped `openai-codex` provider already reads.
 - Tokens stay in the credential plane; nothing secret is ever written to configuration.
+
+![The Effort setting on a Claude model](assets/effort.png)
 
 ## How it works
 
@@ -32,10 +37,16 @@ token through its credential plane, and the bundled pi-ai adapter does the rest.
    into that reference, and refreshes it shortly before expiry (writing the rotated token back so
    Claude Code stays signed in).
 3. **Models.** `GET /v1/models` with the grant returns each model's id, display name, `line`,
-   `created_at`, `max_input_tokens`, `max_tokens`, image capability and lifecycle. The sync keeps
-   `modelsPerFamily` generations per family, skips `deprecated`/`retired`, and only writes when the
-   list changed.
-4. **Codex.** The Codex grant is imported once; pi-ai refreshes it from then on.
+   `created_at`, `max_input_tokens`, `max_tokens`, image capability, lifecycle and its reasoning
+   capabilities. The sync keeps `modelsPerFamily` generations per family, skips
+   `deprecated`/`retired`, and only writes when the list changed.
+4. **Reasoning.** The same capabilities say which effort levels a model accepts and whether it
+   thinks adaptively. The sync writes them as the profile's `reasoningEfforts`, plus
+   `compat.forceAdaptiveThinking` for adaptive-only models (the wire shape they require —
+   `thinking: { type: 'adaptive', effort }`, not a token budget). A hand-declared route inherits
+   no reasoning from an installed catalog entry, so without this step the composer offers no
+   effort setting at all.
+5. **Codex.** The Codex grant is imported once; pi-ai refreshes it from then on.
 
 The bundled pi-ai adapter detects an `sk-ant-oat…` token and switches to the subscription wire
 shape on its own (Bearer auth, Claude Code identity headers, `claude-code-20250219` and
