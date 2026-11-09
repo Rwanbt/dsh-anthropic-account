@@ -87,9 +87,14 @@ const MODEL_MAX_PAGES = 5
  * generation: adaptive thinking with effort levels. Without them DSH
  * materializes the model as non-reasoning and the composer offers no effort
  * setting.
+ *
+ * No `off` here: the generation these placeholders cover cannot disable
+ * thinking, and declaring `off` makes every effort-less request — including the
+ * compaction summarizer's — send `thinking: { type: 'disabled' }`, which those
+ * models reject with a 400. Omitting it leaves the request on the model default.
  */
 const FALLBACK_REASONING = {
-  reasoningEfforts: { off: null, low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max' },
+  reasoningEfforts: { low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max' },
   compat: { forceAdaptiveThinking: true, supportsTemperature: false },
 }
 const FALLBACK_MODELS = [
@@ -98,6 +103,9 @@ const FALLBACK_MODELS = [
   { id: 'claude-haiku-5-5', name: 'Claude Haiku 5.5', contextWindow: 1_000_000, maxTokens: 128_000, input: ['text', 'image'], ...FALLBACK_REASONING },
   { id: 'claude-fable-5-1', name: 'Claude Fable 5.1', contextWindow: 1_000_000, maxTokens: 128_000, input: ['text', 'image'], ...FALLBACK_REASONING },
 ]
+
+/** Placeholder catalog, exported so the shipped shape stays under test. */
+export const PLACEHOLDER_MODELS = FALLBACK_MODELS
 
 export function apply(ctx, config = {}) {
   const providerId = nonEmpty(config.providerId) ?? 'anthropic-account'

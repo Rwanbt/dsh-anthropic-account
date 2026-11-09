@@ -1,6 +1,6 @@
 {
   "name": "dsh-anthropic-account",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "private": false,
   "type": "module",
   "description": "DeepSeek Harness plugin: adds an \"Anthropic-account\" model provider powered by a Claude Pro/Max subscription, and repairs the Codex OAuth connection from the local CLI credentials.",

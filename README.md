@@ -22,8 +22,12 @@ token through its credential plane, and the bundled pi-ai adapter does the rest.
   6 hours, reduced to the **latest generation of each family** (Opus, Sonnet, Haiku, Fable), with
   the real context window, output cap and image support reported by the endpoint.
 - **A working Effort setting** on every model: the endpoint's advertised reasoning levels become
-  the model's `reasoningEfforts`, so the composer offers Off / Low / Medium / High / Xhigh / Max
-  instead of hiding the control.
+  the model's `reasoningEfforts`, so the composer offers Low / Medium / High / Xhigh / Max (plus
+  Off only where the endpoint says the model accepts disabled thinking) instead of hiding the
+  control.
+- **Working compaction.** `/compact` and automatic condensation summarize through a request that
+  names no reasoning effort; the profile is written so that request stays valid on every model
+  (see [How it works](#how-it-works), step 4).
 - **A repaired Codex connection**: `~/.codex/auth.json` is converted into the
   `llm-pi-ai/openai-codex` credential record the shipped `openai-codex` provider already reads.
 - Tokens stay in the credential plane; nothing secret is ever written to configuration.
@@ -42,12 +46,25 @@ token through its credential plane, and the bundled pi-ai adapter does the rest.
    `created_at`, `max_input_tokens`, `max_tokens`, image capability, lifecycle and its reasoning
    capabilities. The sync keeps `modelsPerFamily` generations per family, skips
    `deprecated`/`retired`, and only writes when the list changed.
-4. **Reasoning.** The same capabilities say which effort levels a model accepts and whether it
-   thinks adaptively. The sync writes them as the profile's `reasoningEfforts`, plus
-   `compat.forceAdaptiveThinking` for adaptive-only models (the wire shape they require —
-   `thinking: { type: 'adaptive', effort }`, not a token budget). A hand-declared route inherits
-   no reasoning from an installed catalog entry, so without this step the composer offers no
-   effort setting at all.
+4. **Reasoning.** The same capabilities say which effort levels a model accepts, whether it
+   thinks adaptively, and whether it can stop thinking at all. The sync writes the levels as the
+   profile's `reasoningEfforts`, plus `compat.forceAdaptiveThinking` for adaptive-only models (the
+   wire shape they require — `thinking: { type: 'adaptive', effort }`, not a token budget). A
+   hand-declared route inherits no reasoning from an installed catalog entry, so without this step
+   the composer offers no effort setting at all.
+   `off` is declared **only** when `capabilities.thinking.types.disabled.supported` is true. It is
+   translated into `thinking: { type: 'disabled' }` for any request that names no effort, and
+   current Claude models reject that shape:
+
+   ```
+   400 invalid_request_error: "thinking.type.disabled" is not supported for this model.
+   Use "thinking.type.adaptive" and "output_config.effort" to control thinking behavior.
+   ```
+
+   That is not only a picker problem: the Harness compaction backend summarizes through a plain
+   `llm.stream()` call that selects no effort, so advertising `off` broke `/compact` and every
+   automatic condensation on those models. Leaving `off` undeclared makes the request omit
+   `thinking` entirely, which the endpoint accepts (the model default applies).
 5. **Codex.** The Codex grant is imported once; pi-ai refreshes it from then on.
 
 The bundled pi-ai adapter detects an `sk-ant-oat…` token and switches to the subscription wire
@@ -158,7 +175,7 @@ binary to build.
 ## Development
 
 ```bash
-npm test        # syntax checks + 62 unit and policy tests
+npm test        # syntax checks + 70 unit and policy tests
 ```
 
 The model-selection, credential-parsing, status-redaction and packaging rules are pure functions,

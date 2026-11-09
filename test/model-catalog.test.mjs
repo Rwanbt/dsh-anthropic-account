@@ -11,7 +11,7 @@ import {
 } from '../lib/model-catalog.mjs'
 
 /** One `/v1/models` row, with the defaults a current Claude model carries. */
-function row(id, { line = 'opus', created = '2026-01-01T00:00:00Z', lifecycle = 'active', context = 1_000_000, max = 128_000, image = true, effort, adaptive = false, budget = false } = {}) {
+function row(id, { line = 'opus', created = '2026-01-01T00:00:00Z', lifecycle = 'active', context = 1_000_000, max = 128_000, image = true, effort, adaptive = false, budget = false, disabled = true } = {}) {
   const effortCapability = effort === undefined
     ? undefined
     : {
@@ -35,7 +35,7 @@ function row(id, { line = 'opus', created = '2026-01-01T00:00:00Z', lifecycle = 
         types: {
           adaptive: { supported: adaptive },
           enabled: { supported: budget },
-          disabled: { supported: true },
+          disabled: { supported: disabled },
         },
       },
     },
@@ -231,6 +231,48 @@ test('the profile carries reasoning fields through the reduction', () => {
   assert.equal(model.reasoningEfforts.max, 'max')
   assert.equal(model.reasoningEfforts.off, null)
   assert.equal(model.compat.forceAdaptiveThinking, true)
+})
+
+/* ── "off" is only offered where the model accepts disabled thinking ─────── */
+
+test('a model that cannot disable thinking is never offered off', () => {
+  const fields = reasoningFieldsFromCapabilities(
+    row('claude-opus-5-5', { effort: ['low', 'medium', 'high', 'xhigh', 'max'], adaptive: true, disabled: false }),
+  )
+  assert.equal('off' in fields.reasoningEfforts, false)
+  assert.deepEqual(fields.reasoningEfforts, { low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max' })
+  assert.deepEqual(fields.compat, { forceAdaptiveThinking: true, supportsTemperature: false })
+})
+
+test('a budget-thinking model that cannot disable thinking is never offered off', () => {
+  const fields = reasoningFieldsFromCapabilities(row('claude-sonnet-4-6', { effort: ['low', 'high'], budget: true, disabled: false }))
+  assert.deepEqual(Object.keys(fields.reasoningEfforts), ['low', 'high'])
+})
+
+test('a model that does accept disabled thinking still offers off', () => {
+  const fields = reasoningFieldsFromCapabilities(row('claude-haiku-5-5', { effort: ['low', 'high'], adaptive: true, disabled: true }))
+  assert.equal(fields.reasoningEfforts.off, null)
+})
+
+test('a listing only advertises off for the models that support it', () => {
+  const models = profileModelsFromListing(
+    [
+      row('claude-opus-5-5', { created: '2026-09-21T00:00:00Z', effort: ['low', 'high'], adaptive: true, disabled: false }),
+      row('claude-haiku-5-5', { line: 'haiku', created: '2026-10-07T00:00:00Z', effort: ['low', 'high'], adaptive: true, disabled: true }),
+      row('claude-sonnet-5-5', { line: 'sonnet', created: '2026-09-28T00:00:00Z', effort: ['low', 'high'], adaptive: true, disabled: false }),
+    ],
+    1,
+  )
+  const withOff = models.filter((model) => model.reasoningEfforts !== undefined && 'off' in model.reasoningEfforts).map((model) => model.id)
+  assert.deepEqual(withOff, ['claude-haiku-5-5'])
+  // Every advertised level is still mapped, so the picker keeps its efforts.
+  for (const model of models) assert.deepEqual(Object.keys(model.reasoningEfforts), model.id === 'claude-haiku-5-5' ? ['off', 'low', 'high'] : ['low', 'high'])
+})
+
+test('sameModels treats gaining or losing off as a catalog change', () => {
+  const without = profileModelsFromListing([row('claude-opus-5-5', { effort: ['low', 'high'], adaptive: true, disabled: false })], 1)
+  const withOff = profileModelsFromListing([row('claude-opus-5-5', { effort: ['low', 'high'], adaptive: true, disabled: true })], 1)
+  assert.equal(sameModels(without, withOff), false)
 })
 
 test('sameModels detects a reasoning-capability change', () => {
