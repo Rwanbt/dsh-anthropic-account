@@ -15,7 +15,7 @@ update check. A test asserts this allowlist over the shipped sources.
 
 ## Guarantees enforced by the test suite
 
-`npm test` runs 55 deterministic checks, including source-level policy assertions:
+`npm test` runs 62 deterministic checks, including source-level policy assertions:
 
 - **No shell.** Process spawning imports `execFile` only — never `exec`, `execSync`, `spawn`,
   `shell: true`, `eval` or `new Function`. Keychain values are passed as arguments, so a service

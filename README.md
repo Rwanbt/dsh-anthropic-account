@@ -1,6 +1,8 @@
 # dsh-anthropic-account
 
 [![CI](https://github.com/Rwanbt/dsh-anthropic-account/actions/workflows/ci.yml/badge.svg)](https://github.com/Rwanbt/dsh-anthropic-account/actions/workflows/ci.yml)
+[![release](https://img.shields.io/github/v/release/Rwanbt/dsh-anthropic-account)](https://github.com/Rwanbt/dsh-anthropic-account/releases)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) plugin that adds an
 **Anthropic-account** model provider powered by your **Claude Pro/Max subscription**, and repairs
@@ -55,8 +57,8 @@ Anthropic protocol code.
 
 ## Requirements
 
-- DeepSeek Harness `0.2.2` or newer, with the `llm-pi-ai`, `settings` and `credentials` plugins
-  mounted (they are part of the shipped base/web bundles).
+- DeepSeek Harness `0.2.2` or newer (tested against `0.2.2-rc.1`), with the `llm-pi-ai`,
+  `settings` and `credentials` plugins mounted (they are part of the shipped base/web bundles).
 - **Claude Code** installed and signed in to a Claude Pro/Max account on the same machine.
 - Node.js 20+ (the Harness bundles its own runtime).
 - Optional: the Codex CLI signed in, for the Codex repair.
@@ -75,6 +77,9 @@ git clone https://github.com/Rwanbt/dsh-anthropic-account.git
 
 The plugin provisions its route as soon as it loads; no further step is needed. Restart the
 Harness after cloning to a new path.
+
+To remove it again, delete the `anthropic-account` provider row on the Models page and remove the
+bundle. The credential reference and the rotated Claude Code tokens stay valid, so nothing breaks.
 
 ## Where the credentials come from
 
@@ -108,18 +113,23 @@ The last run is published to `~/.dsh/anthropic-account-status.json`:
 
 ```json
 {
-  "provider": { "id": "anthropic-account", "provisioned": true },
-  "claude": { "ok": true, "source": "claude-code", "expiresAt": 1794179477940 },
+  "version": 1,
+  "checkedAt": "2026-11-09T02:00:27.000Z",
+  "provider": { "id": "anthropic-account", "ref": "ANTHROPIC_ACCOUNT_OAUTH", "provisioned": true },
+  "claude": { "ok": true, "store": "file", "source": "claude-code", "expiresAt": 1794179477940, "refreshed": false },
   "codex": { "ok": true, "imported": false },
   "models": {
     "ok": true,
     "count": 4,
     "ids": ["claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5", "claude-fable-5-1"],
-    "syncedAt": "2026-11-08T15:35:12.031Z",
+    "syncedAt": "2026-11-09T01:58:12.031Z",
     "changed": true
   }
 }
 ```
+
+The document is passed through a redaction guard before every write, so a future field cannot
+start leaking a token.
 
 ## Platform support
 
@@ -148,7 +158,7 @@ binary to build.
 ## Development
 
 ```bash
-npm test        # syntax checks + 55 unit and policy tests
+npm test        # syntax checks + 62 unit and policy tests
 ```
 
 The model-selection, credential-parsing, status-redaction and packaging rules are pure functions,
