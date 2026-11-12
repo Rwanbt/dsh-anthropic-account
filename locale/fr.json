@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "Fournisseur Anthropic account",
-    "description": "Ajoute un fournisseur de modèles Anthropic-account alimenté par ton abonnement Claude Pro/Max, et répare la connexion OAuth Codex à partir des identifiants locaux des CLI."
+    "title": "Compte Anthropic",
+    "description": "Ajoute un fournisseur Anthropic-account alimenté par un abonnement Claude Pro/Max, répare la connexion OAuth Codex et permet de connecter les deux comptes depuis Réglages → Modèles."
   }
 }

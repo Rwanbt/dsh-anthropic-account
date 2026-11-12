@@ -11,7 +11,7 @@ import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
-const RUNTIME_FILES = ['index.js', 'logic.js', join('lib', 'credentials.mjs'), join('lib', 'model-catalog.mjs'), join('lib', 'status.mjs')]
+const RUNTIME_FILES = ['index.js', 'logic.js', join('lib', 'credentials.mjs'), join('lib', 'model-catalog.mjs'), join('lib', 'sign-in.mjs'), join('lib', 'status.mjs')]
 
 /** Read the shipped runtime sources. */
 async function runtimeSources() {
@@ -43,7 +43,9 @@ test('process spawning is limited to execFile, with no shell and no eval', async
       assert.deepEqual(names, ['execFile'], `${file} imports ${names.join(', ')} from node:child_process`)
     }
     assert.doesNotMatch(text, /execSync\s*\(/u, `${file} uses execSync()`)
-    assert.doesNotMatch(text, /\bspawn(?:Sync)?\s*\(/u, `${file} uses spawn()`)
+    // The Host subprocess service is the only process seam; a bare Node spawn
+    // stays forbidden.
+    assert.doesNotMatch(text, /(?<![.\w])spawn(?:Sync)?\s*\(/u, `${file} uses a bare spawn()`)
     assert.doesNotMatch(text, /shell\s*:\s*true/u, `${file} asks for a shell`)
     assert.doesNotMatch(text, /\beval\s*\(/u, `${file} uses eval()`)
     assert.doesNotMatch(text, /new Function\s*\(/u, `${file} uses new Function()`)
@@ -52,10 +54,23 @@ test('process spawning is limited to execFile, with no shell and no eval', async
   const logic = await readFile(join(ROOT, 'logic.js'), 'utf8')
   assert.match(logic, /promisify\(execFile\)/u, 'the Keychain reader must wrap execFile')
   assert.match(logic, /execFileAsync\(/u, 'the Keychain calls must go through execFile')
+  // The in-app sign-in starts the vendor CLI through the Host subprocess
+  // service, with one constant command line that no request can influence.
+  assert.match(logic, /subprocess\.spawn\(/u, 'sign-in must use the Host subprocess service')
+  assert.match(logic, /const command = kind === 'claude' \? 'claude auth login' : 'codex login --device-auth'/u,
+    'the sign-in command must stay a constant')
 })
 
-test('network access is limited to the two provider origins', async () => {
-  const allowed = new Set(['api.anthropic.com', 'claude.ai', 'platform.claude.com'])
+test('network access is limited to the provider origins', async () => {
+  const allowed = new Set([
+    'api.anthropic.com',
+    'claude.ai',
+    'claude.com',
+    'platform.claude.com',
+    'auth.openai.com',
+    'chatgpt.com',
+    'chat.openai.com',
+  ])
   for (const { file, text } of await runtimeSources()) {
     for (const match of text.matchAll(/https?:\/\/([A-Za-z0-9.-]+)/gu)) {
       assert.ok(allowed.has(match[1]), `${file} reaches an unexpected host: ${match[1]}`)

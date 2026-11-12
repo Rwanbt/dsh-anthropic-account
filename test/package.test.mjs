@@ -59,6 +59,14 @@ test('the icon is a small, valid SVG exported by the manifest', async () => {
   assert.match(svg, /viewBox="/u)
 })
 
+test('the bundle ships its settings client half', () => {
+  assert.equal(manifest.exports['./client'], './client.js')
+  assert.ok(manifest.files.includes('client.js'), 'client.js must be published')
+  assert.equal(manifest.dsh.client.platform, 'web')
+  assert.equal(manifest.dsh.client.immediately, true)
+  assert.ok(manifest.dsh.client.inject.includes('@deepseek-ai/dsh-client-ui-settings-models'))
+})
+
 test('every runtime file is listed in the published file set', () => {
   const files = manifest.files
   const listed = new Set(files)

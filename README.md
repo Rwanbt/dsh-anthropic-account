@@ -5,9 +5,10 @@
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) plugin that adds an
-**Anthropic-account** model provider powered by your **Claude Pro/Max subscription**, and repairs
+**Anthropic-account** model provider powered by your **Claude Pro/Max subscription**, repairs
 the **Codex** OAuth connection — both by reusing the credentials the Claude Code and Codex CLIs
-already keep on your machine.
+already keep on your machine — and adds a **one-click account connection panel** to
+**Settings → Models**.
 
 ![The Anthropic-account group in the model picker](assets/models.png)
 
@@ -30,6 +31,9 @@ token through its credential plane, and the bundled pi-ai adapter does the rest.
   (see [How it works](#how-it-works), step 4).
 - **A repaired Codex connection**: `~/.codex/auth.json` is converted into the
   `llm-pi-ai/openai-codex` credential record the shipped `openai-codex` provider already reads.
+- **Account connections in Settings → Models**: two cards start the official Claude Code and
+  Codex sign-in flows, show the authorize URL, display the ChatGPT one-time code, accept the
+  authorization code the Claude page prints, and report the result — no terminal needed.
 - Tokens stay in the credential plane; nothing secret is ever written to configuration.
 
 ![The Effort setting on a Claude model](assets/effort.png)
@@ -66,6 +70,11 @@ token through its credential plane, and the bundled pi-ai adapter does the rest.
    automatic condensation on those models. Leaving `off` undeclared makes the request omit
    `thinking` entirely, which the endpoint accepts (the model default applies).
 5. **Codex.** The Codex grant is imported once; pi-ai refreshes it from then on.
+6. **In-app connection.** The settings panel starts `claude auth login` or
+   `codex login --device-auth` through the Harness subprocess service, reads the URL (and the
+   Codex one-time code) from the CLI output, and writes the authorization code you paste back to
+   the CLI's stdin. A successful exit runs the same mirror/import steps as the bootstrap, so the
+   provider and the quota panel update without a restart.
 
 The bundled pi-ai adapter detects an `sk-ant-oat…` token and switches to the subscription wire
 shape on its own (Bearer auth, Claude Code identity headers, `claude-code-20250219` and
@@ -76,9 +85,9 @@ Anthropic protocol code.
 
 - DeepSeek Harness `0.2.2` or newer (tested against `0.2.2-rc.1`), with the `llm-pi-ai`,
   `settings` and `credentials` plugins mounted (they are part of the shipped base/web bundles).
-- **Claude Code** installed and signed in to a Claude Pro/Max account on the same machine.
+- **Claude Code** installed and available on `PATH`, to sign in and keep the session refreshed.
 - Node.js 20+ (the Harness bundles its own runtime).
-- Optional: the Codex CLI signed in, for the Codex repair.
+- Optional: the **Codex CLI** on `PATH`, for the Codex connection and repair.
 
 ## Install
 
@@ -107,6 +116,20 @@ bundle. The credential reference and the rotated Claude Code tokens stay valid, 
 | macOS | login Keychain: `Claude Code-credentials` (and `Claude Code-credentials-<hash8>` per config dir), falling back to `~/.claude/.credentials.json` | `~/.codex/auth.json` |
 
 The status file records which source was used (`claude.source`).
+
+## Sign in from Settings → Models
+
+The **Account connections** block at the bottom of the page offers one card per account:
+
+- **Claude (Pro/Max)** — *Sign in* starts `claude auth login` and opens the browser. After
+  authorizing on claude.com, copy the code the page shows, paste it into the card, and validate.
+  The card turns *Connected* with the subscription plan once the token is mirrored.
+- **ChatGPT (Codex)** — *Sign in* starts `codex login --device-auth`. The card shows the
+  one-time code and the device page; enter the code there and approve. The card completes on its
+  own.
+
+Each action answers with the live connection snapshot, and the provider list, model picker and
+quota panel update when the flow completes.
 
 ## Configuration
 
@@ -170,12 +193,14 @@ binary to build.
   in, its refresh token was rotated by the Harness.
 - **Manual edits to this route's model list are overwritten** by the next sync
   (6 h). Use `syncModels: false` for a hand-written catalog.
-- There is no in-app sign-in flow: the plugin reuses an existing Claude Code session.
+- The in-app connection panel drives the vendor CLIs; it does not implement OAuth itself. A
+  machine without `claude` or `codex` on `PATH` still works from an existing CLI session, but
+  cannot start a new one from the panel.
 
 ## Development
 
 ```bash
-npm test        # syntax checks + 70 unit and policy tests
+npm test        # syntax checks + 82 unit and policy tests
 ```
 
 The model-selection, credential-parsing, status-redaction and packaging rules are pure functions,

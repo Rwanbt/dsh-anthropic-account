@@ -50,6 +50,7 @@ import {
   parseClaudeDocument,
 } from './lib/credentials.mjs'
 import { perFamilyCount, profileModelsFromListing, sameModels } from './lib/model-catalog.mjs'
+import { createSignInManager, openableUrl, redactDiagnostic } from './lib/sign-in.mjs'
 import { redactCredentialMaterial } from './lib/status.mjs'
 
 const execFileAsync = promisify(execFile)
@@ -77,6 +78,8 @@ const PROVISION_ATTEMPTS = 8
 const PROVISION_RETRY_MS = 2500
 const MODEL_PAGE_LIMIT = 1000
 const MODEL_MAX_PAGES = 5
+/** Retained child output for one sign-in attempt. */
+const SIGN_IN_OUTPUT_BYTES = 64 * 1024
 
 /**
  * Models used only until the first successful discovery, so a brand-new install
@@ -129,6 +132,7 @@ export function apply(ctx, config = {}) {
       claude: { ok: false, store: undefined, source: undefined, expiresAt: undefined, refreshed: false, error: undefined },
       codex: { ok: false, imported: false, error: undefined },
       models: { ok: false, count: 0, ids: [], syncedAt: undefined, changed: false, error: undefined },
+      signIn: { routes: false, subprocess: false },
     }
 
     const log = (level, message) => {
@@ -203,6 +207,155 @@ export function apply(ctx, config = {}) {
         publish()
       }
     }
+
+    /**
+     * One in-app sign-in attempt per account, rendered by the settings page.
+     * The CLIs own the OAuth exchange; this only reads the URL/code they print
+     * and turns a successful exit into the same mirror/import the bootstrap
+     * already performs.
+     */
+    const signIn = createSignInManager({
+      launch: (kind) => launchSignInProcess(host, kind),
+      onClaudeConnected: async () => {
+        await mirror()
+        await refreshModels({ force: true })
+      },
+      onCodexConnected: async () => {
+        const repaired = await repairCodexGrant(host, { force: true })
+        if (repaired.ok !== true) throw new Error(repaired.reason ?? 'import du jeton Codex impossible')
+      },
+    })
+    host.effect(() => () => signIn.dispose(), 'anthropic-account: sign-in flows')
+
+    /** Connection facts and live flow state for the settings page. */
+    const signInStatus = async () => {
+      let claudeStore
+      try {
+        claudeStore = await readClaudeStore()
+      } catch {
+        claudeStore = undefined
+      }
+      let codexRecord
+      try {
+        codexRecord = await readRecord(host.get('credentials'), 'llm-pi-ai/openai-codex')
+      } catch {
+        codexRecord = undefined
+      }
+      const codexGrant = codexRecord?.kind === 'grant' ? codexRecord.payload : undefined
+      return {
+        claude: {
+          connected: isSubscriptionToken(claudeStore?.oauth?.accessToken),
+          plan: nonEmpty(claudeStore?.oauth?.subscriptionType) ?? null,
+          ...signIn.status().claude,
+        },
+        codex: {
+          connected: codexGrant !== undefined && typeof codexGrant.access === 'string' && codexGrant.access.length > 0,
+          ...signIn.status().codex,
+        },
+        available: {
+          signIn: host.get('subprocess') !== undefined,
+        },
+      }
+    }
+
+    // The settings page talks to these routes over the authenticated shared
+    // channel. Each action answers the whole connection snapshot, so the page
+    // never needs a second round trip to learn the new state.
+    ctx.inject(['connection'], (connCtx) => {
+      const connection = connCtx.get('connection')
+      const registry = connection?.fetch
+      if (registry === undefined || typeof registry.register !== 'function') return
+
+      const respond = (body, status = 200) => new Response(JSON.stringify(body), {
+        status,
+        headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
+      })
+      const bodyOf = async (request) => {
+        const text = await request.text()
+        if (text.length === 0) return {}
+        if (text.length > 8192) throw new Error('request body too large')
+        return JSON.parse(text)
+      }
+      const withStatus = async () => ({ ok: true, ...(await signInStatus()) })
+      const guarded = (operation) => async (request) => {
+        try {
+          return await operation(request)
+        } catch (error) {
+          log('warn', `sign-in route failed: ${messageOf(error)}`)
+          return respond({ ok: false, error: redactDiagnostic(messageOf(error)) }, 500)
+        }
+      }
+
+      const routes = [
+        {
+          path: '/api/anthropic-account/status',
+          methods: ['GET'],
+          requestBody: 'buffered',
+          fetch: guarded(async () => respond(await withStatus())),
+        },
+        {
+          path: '/api/anthropic-account/claude/start',
+          methods: ['POST'],
+          requestBody: 'buffered',
+          fetch: guarded(async () => {
+            await signIn.start('claude')
+            return respond(await withStatus())
+          }),
+        },
+        {
+          path: '/api/anthropic-account/claude/code',
+          methods: ['POST'],
+          requestBody: 'buffered',
+          fetch: guarded(async (request) => {
+            const body = await bodyOf(request)
+            const outcome = signIn.submitClaudeCode(body?.code)
+            if (outcome.ok !== true) return respond({ ok: false, error: outcome.error }, 400)
+            return respond(await withStatus())
+          }),
+        },
+        {
+          path: '/api/anthropic-account/codex/start',
+          methods: ['POST'],
+          requestBody: 'buffered',
+          fetch: guarded(async () => {
+            await signIn.start('codex')
+            return respond(await withStatus())
+          }),
+        },
+        {
+          path: '/api/anthropic-account/cancel',
+          methods: ['POST'],
+          requestBody: 'buffered',
+          fetch: guarded(async (request) => {
+            const body = await bodyOf(request)
+            signIn.cancel(body?.provider === 'codex' ? 'codex' : 'claude')
+            return respond(await withStatus())
+          }),
+        },
+        {
+          path: '/api/anthropic-account/open',
+          methods: ['POST'],
+          requestBody: 'buffered',
+          fetch: guarded(async (request) => {
+            const body = await bodyOf(request)
+            const target = openableUrl(body?.url)
+            if (target === undefined) return respond({ ok: false, error: 'URL non autorisée' }, 400)
+            await openExternal(target)
+            return respond({ ok: true })
+          }),
+        },
+      ]
+      for (const route of routes) {
+        try {
+          ctx.effect(() => registry.register(route), `anthropic-account: ${route.path}`)
+          status.signIn.routes = true
+        } catch (error) {
+          log('warn', `sign-in route not registered: ${messageOf(error)}`)
+        }
+      }
+      status.signIn.subprocess = host.get('subprocess') !== undefined
+      publish()
+    })
 
     const bootstrap = async () => {
       // Activating this plugin is itself a Loader/HMR transaction, and a settings
@@ -714,7 +867,7 @@ async function refreshClaudeToken(refreshToken) {
  * @param {object} ctx injected Host context carrying `credentials`.
  * @returns {Promise<{ok: boolean, imported?: boolean, reason?: string}>}
  */
-async function repairCodexGrant(ctx) {
+async function repairCodexGrant(ctx, options = {}) {
   const credentials = ctx.get('credentials')
   if (credentials === undefined) return { ok: false, reason: 'no credentials service' }
 
@@ -731,7 +884,7 @@ async function repairCodexGrant(ctx) {
   const current = await readRecord(credentials, key)
   const payload = current?.kind === 'grant' ? current.payload : undefined
   if (payload?.access === built.payload.access) return { ok: true, imported: false }
-  if (isHealthyCodexGrant(payload, Date.now())) {
+  if (options.force !== true && isHealthyCodexGrant(payload, Date.now())) {
     return { ok: true, imported: false, reason: 'a newer stored Codex grant is already valid' }
   }
 
@@ -745,6 +898,76 @@ async function readRecord(credentials, key) {
     return await credentials.readRecord(key)
   } catch {
     return undefined
+  }
+}
+
+/* ── in-app sign-in processes ────────────────────────────────────────────── */
+
+/**
+ * Start one vendor CLI sign-in through the Host subprocess service.
+ *
+ * Both CLIs are launched through the platform shell with one constant command
+ * line — nothing from a request reaches it — because the npm shims are batch
+ * files on Windows that cannot be executed as a Win32 image. The subprocess
+ * service owns the process tree, the deadline, and the output bounds; the
+ * account half above only reads the URL/code the CLI prints and writes the
+ * pasted authorization code back.
+ * @param {object} ctx Host context carrying `subprocess`.
+ * @param {'claude'|'codex'} kind account being connected.
+ * @returns {{write: Function, read: Function, done: Promise<object>, terminate: Function}} the running attempt.
+ */
+function launchSignInProcess(ctx, kind) {
+  const subprocess = ctx.get('subprocess')
+  if (subprocess === undefined) throw new Error('le service de sous-processus est indisponible')
+  const command = kind === 'claude' ? 'claude auth login' : 'codex login --device-auth'
+  const argv = process.platform === 'win32'
+    ? [process.env.ComSpec ?? 'cmd.exe', '/d', '/s', '/c', command]
+    : ['/bin/sh', '-c', command]
+  const handle = subprocess.spawn({
+    argv,
+    cwd: homedir(),
+    stdio: {
+      stdin: 'pipe',
+      stdout: { maxBytes: SIGN_IN_OUTPUT_BYTES },
+      stderr: { maxBytes: SIGN_IN_OUTPUT_BYTES },
+    },
+    graceMs: 3000,
+  })
+  let stdoutOffset = 0
+  let stderrOffset = 0
+  return {
+    write(text) {
+      if (handle.stdin === undefined) throw new Error('le CLI n’a pas exposé son entrée standard')
+      handle.stdin.write(text)
+    },
+    read() {
+      let chunk = ''
+      const out = handle.collected.stdout?.readFrom(stdoutOffset)
+      if (out !== undefined) {
+        stdoutOffset = out.nextOffset
+        chunk += out.text
+      }
+      const err = handle.collected.stderr?.readFrom(stderrOffset)
+      if (err !== undefined) {
+        stderrOffset = err.nextOffset
+        chunk += err.text
+      }
+      return chunk
+    },
+    done: handle.done,
+    terminate() {
+      handle.terminate()
+    },
+  }
+}
+
+/** Open one allowlisted URL in the user's default browser. */
+async function openExternal(url) {
+  const opener = process.platform === 'win32' ? 'explorer.exe' : process.platform === 'darwin' ? 'open' : 'xdg-open'
+  try {
+    await execFileAsync(opener, [url], { timeout: 5_000 })
+  } catch {
+    // explorer.exe reports a non-zero exit after handing the URL to the shell
   }
 }
 
