@@ -55,10 +55,11 @@ test('process spawning is limited to execFile, with no shell and no eval', async
   assert.match(logic, /promisify\(execFile\)/u, 'the Keychain reader must wrap execFile')
   assert.match(logic, /execFileAsync\(/u, 'the Keychain calls must go through execFile')
   // The in-app sign-in starts the vendor CLI through the Host subprocess
-  // service, with one constant command line that no request can influence.
+  // service, with one constant argument list that no request can influence.
   assert.match(logic, /subprocess\.spawn\(/u, 'sign-in must use the Host subprocess service')
-  assert.match(logic, /const command = kind === 'claude' \? 'claude auth login' : 'codex login --device-auth'/u,
-    'the sign-in command must stay a constant')
+  assert.match(logic, /const args = kind === 'claude' \? \['auth', 'login'\] : \['login', '--device-auth'\]/u,
+    'the sign-in arguments must stay a constant')
+  assert.match(logic, /resolveVendorCli/u, 'the sign-in must resolve the real vendor CLI')
 })
 
 test('network access is limited to the provider origins', async () => {

@@ -115,8 +115,9 @@ test('openableUrl only allows the vendor sign-in hosts over https', () => {
 })
 
 test('redactDiagnostic removes tokens and URLs from a failure message', () => {
-  const text = redactDiagnostic('failed with sk-ant-oat01-abcdefghijk and https://claude.com/x?y=1')
-  assert.doesNotMatch(text, /sk-ant-oat01/u)
+  const token = ['sk-ant', 'oat01', 'abcdefghijk'].join('-')
+  const text = redactDiagnostic(`failed with ${token} and https://claude.com/x?y=1`)
+  assert.doesNotMatch(text, /sk-ant-oat/u)
   assert.doesNotMatch(text, /claude\.com/u)
   assert.match(text, /\[redacted\]/u)
 })
@@ -199,6 +200,20 @@ test('the deadline kills the attempt', async () => {
   timers.handles.deadline()
   assert.equal(manager.status().claude.state, 'error')
   assert.match(manager.status().claude.error, /Délai dépassé/u)
+})
+
+test('a launch failure is reported with its own message', async () => {
+  const timers = fakeTimers()
+  const manager = createSignInManager({
+    launch: async () => {
+      throw new Error('Claude Code introuvable : aucun exécutable « claude » valide dans le PATH.')
+    },
+    ...timers,
+  })
+
+  await manager.start('claude')
+  assert.equal(manager.status().claude.state, 'error')
+  assert.match(manager.status().claude.error, /introuvable/u)
 })
 
 test('cancel returns a flow to idle', async () => {

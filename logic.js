@@ -903,26 +903,91 @@ async function readRecord(credentials, key) {
 
 /* ── in-app sign-in processes ────────────────────────────────────────────── */
 
+/** Version output that identifies each vendor CLI (a same-named Python script must not win). */
+const CLI_VERSION_MARKER = { claude: /claude code/iu, codex: /codex(?:-cli)?\s+\d/iu }
+/** Resolved executable per kind, so one attempt does not re-probe the PATH. */
+const resolvedCli = new Map()
+const CLI_CACHE_MS = 5 * 60 * 1000
+
+/** Every executable the PATH offers under one command name, in PATH order. */
+async function listCliCandidates(name) {
+  const found = []
+  try {
+    const { stdout } = process.platform === 'win32'
+      ? await execFileAsync('where.exe', [name], { timeout: 5_000, windowsHide: true })
+      : await execFileAsync('which', ['-a', name], { timeout: 5_000 })
+    for (const line of stdout.split(/\r?\n/u)) {
+      const candidate = line.trim()
+      if (candidate !== '') found.push(candidate)
+    }
+  } catch {
+    // no match on this platform's lookup
+  }
+  return [...new Set(found)]
+}
+
+/** Ask one candidate for its version; a failed probe answers with whatever it printed. */
+async function probeCliVersion(candidate) {
+  const versionArgs = ['--version']
+  try {
+    const { stdout, stderr } = process.platform === 'win32'
+      ? await execFileAsync(
+        process.env.ComSpec ?? 'cmd.exe',
+        ['/d', '/c', 'call', candidate, '--version'],
+        { timeout: 5_000, windowsHide: true },
+      )
+      : await execFileAsync(candidate, versionArgs, { timeout: 5_000, windowsHide: true })
+    return `${stdout} ${stderr}`.trim()
+  } catch (error) {
+    return `${error?.stdout ?? ''} ${error?.stderr ?? ''}`.trim()
+  }
+}
+
+/**
+ * The vendor CLI actually installed for an account, not merely the first
+ * same-named command on the PATH. A broken `claude.exe` from another package
+ * would otherwise shadow Claude Code; a version probe tells them apart.
+ * @param {'claude'|'codex'} kind account being connected.
+ * @returns {Promise<string>} the absolute executable path.
+ */
+async function resolveVendorCli(kind) {
+  const name = kind === 'claude' ? 'claude' : 'codex'
+  const cached = resolvedCli.get(kind)
+  if (cached !== undefined && Date.now() - cached.at < CLI_CACHE_MS) return cached.path
+  const candidates = await listCliCandidates(name)
+  for (const candidate of candidates) {
+    const version = await probeCliVersion(candidate)
+    if (version !== '' && CLI_VERSION_MARKER[kind].test(version)) {
+      resolvedCli.set(kind, { path: candidate, at: Date.now() })
+      return candidate
+    }
+  }
+  resolvedCli.delete(kind)
+  const seen = candidates.length === 0 ? '' : ` (trouvés : ${candidates.slice(0, 3).join(', ')})`
+  throw new Error(`${kind === 'claude' ? 'Claude Code' : 'Codex'} introuvable : aucun exécutable « ${name} » valide dans le PATH${seen}.`)
+}
+
 /**
  * Start one vendor CLI sign-in through the Host subprocess service.
  *
- * Both CLIs are launched through the platform shell with one constant command
- * line — nothing from a request reaches it — because the npm shims are batch
- * files on Windows that cannot be executed as a Win32 image. The subprocess
- * service owns the process tree, the deadline, and the output bounds; the
- * account half above only reads the URL/code the CLI prints and writes the
- * pasted authorization code back.
+ * The executable is resolved to the real CLI (never the first same-named
+ * command), and Windows runs the npm shim through the platform shell because a
+ * `.cmd` file cannot be executed as a Win32 image — with one constant argument
+ * list that nothing from a request can influence. The subprocess service owns
+ * the process tree, the deadline, and the output bounds; the account half above
+ * only reads the URL/code the CLI prints and writes the pasted code back.
  * @param {object} ctx Host context carrying `subprocess`.
  * @param {'claude'|'codex'} kind account being connected.
- * @returns {{write: Function, read: Function, done: Promise<object>, terminate: Function}} the running attempt.
+ * @returns {Promise<{write: Function, read: Function, done: Promise<object>, terminate: Function}>} the running attempt.
  */
-function launchSignInProcess(ctx, kind) {
+async function launchSignInProcess(ctx, kind) {
   const subprocess = ctx.get('subprocess')
   if (subprocess === undefined) throw new Error('le service de sous-processus est indisponible')
-  const command = kind === 'claude' ? 'claude auth login' : 'codex login --device-auth'
+  const executable = await resolveVendorCli(kind)
+  const args = kind === 'claude' ? ['auth', 'login'] : ['login', '--device-auth']
   const argv = process.platform === 'win32'
-    ? [process.env.ComSpec ?? 'cmd.exe', '/d', '/s', '/c', command]
-    : ['/bin/sh', '-c', command]
+    ? [process.env.ComSpec ?? 'cmd.exe', '/d', '/c', 'call', executable, ...args]
+    : [executable, ...args]
   const handle = subprocess.spawn({
     argv,
     cwd: homedir(),
