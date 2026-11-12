@@ -955,7 +955,10 @@ async function resolveVendorCli(kind) {
   const cached = resolvedCli.get(kind)
   if (cached !== undefined && Date.now() - cached.at < CLI_CACHE_MS) return cached.path
   const candidates = await listCliCandidates(name)
-  for (const candidate of candidates) {
+  // `which` may be absent on a minimal POSIX image; the bare name still
+  // resolves through PATH when the kernel executes it, so probe that too.
+  const probes = process.platform === 'win32' || candidates.length > 0 ? candidates : [name]
+  for (const candidate of probes) {
     const version = await probeCliVersion(candidate)
     if (version !== '' && CLI_VERSION_MARKER[kind].test(version)) {
       resolvedCli.set(kind, { path: candidate, at: Date.now() })

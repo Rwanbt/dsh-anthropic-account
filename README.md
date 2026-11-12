@@ -129,7 +129,10 @@ The **Account connections** block at the bottom of the page offers one card per 
   own.
 
 Each action answers with the live connection snapshot, and the provider list, model picker and
-quota panel update when the flow completes.
+quota panel update when the flow completes. The panel is cross-platform: it looks the CLI up on
+the platform's `PATH` (`where` on Windows, `which -a` elsewhere), launches the npm shim through
+the platform shell only when Windows requires it, and opens the vendor page with the platform's
+own opener (`start`/`explorer`, `open`, or `xdg-open`).
 
 ## Configuration
 
@@ -176,7 +179,7 @@ start leaking a token.
 | Platform | Status |
 |---|---|
 | Windows | tested, working (file store) |
-| Linux | supported: same file-store code path as Windows, unit-tested in CI |
+| Linux | supported: same file-store code path as Windows; the connection panel resolves the CLI with `which -a` and opens pages with `xdg-open`, unit-tested in CI on `ubuntu-latest` |
 | macOS | supported, untested here: reads and updates the login Keychain entry through the `security` CLI, with the file store as fallback |
 
 Only Node built-ins and Harness services are used, so there is no native module or platform

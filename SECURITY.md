@@ -38,10 +38,7 @@ endpoint, and no update check. Tests assert both allowlists over the shipped sou
 
 ## What is not covered by tests
 
-The impure edges — Keychain reads through `security`, file reads, HTTP calls, and settings
-mutation — are exercised against the real environment manually rather than in CI, because they
-require a Harness, a signed-in CLI, or a subscription. The pure rules those edges delegate to
-(parsing, naming, expiry, refresh decision, catalog reduction, redaction) are fully covered.
+The impure edges — Keychain reads through `security`, file reads, HTTP calls, settings mutation, vendor-CLI discovery through `where`/`which`, and opening a vendor page through the platform opener — are exercised against the real environment manually rather than in CI, because they require a Harness, a signed-in CLI, or a subscription. The pure rules those edges delegate to (parsing, naming, expiry, refresh decision, catalog reduction, redaction) are fully covered, and the unit suite runs on Linux, macOS and Windows in CI.
 
 ## Reporting
 
